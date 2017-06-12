@@ -1,0 +1,126 @@
+language: workflow
+tools:
+  ant:
+    - 1.9.7
+  maven:
+    - 3.2.5
+  jdk:
+    - 1.6.0_30-b12
+  atg:
+    - 10.2
+  jboss:
+    - 5.1.2
+envs:
+  global:
+    variables:
+      ANT_OPTS: -Xmx512m
+      LANG: en_US.UTF-8
+      DYNAMO_HOME: ${ATG_HOME}/home
+      DYNAMO_ROOT: ${ATG_HOME}
+      JAVA_VM: ${JAVA_HOME}/bin/java
+      VERSION: 1.0.99
+      VERSION_RELEASE: 1.0.98
+
+  rest:
+    variables:
+      appname: rest
+      oneops.assembly: atg-rest
+      platform: restapp
+
+  csc:
+    variables:
+      appname: csc
+      oneops.assembly: atg-csc
+      platform: cscapp
+  ca:
+    variables:
+      appname: ca
+      oneops.assembly: atg-ca
+      platform: caapp
+  services:
+    variables:
+      appname: services
+      oneops.assembly: atg-services
+      platform: servicesapp
+  oss:
+    variables:
+      appname: oss
+      oneops.assembly: atg-oss
+      platform: ossapp
+
+triggers:
+  - cron:
+      spec: H 16 * * * *
+      call: restBD
+      timezone: America/Los_Angeles
+
+flows:
+  default:
+   - call: init
+   - call: appbuild($appname)
+
+  pr:
+   call: default
+
+  init:
+  - |
+   #!/bin/bash
+   echo " BUILDING ATG-${appname} "
+   cp $WORKSPACE/third-party-dependencies/lib/assembler.jar $ANT_HOME/lib/.
+   cp $WORKSPACE/third-party-dependencies/lib/ant-contrib-1.0b2.jar $ANT_HOME/lib/.
+   chmod -R 755 $JAVA_HOME/bin
+  appbuild:
+  - |
+   #!/bin/bash
+   echo "CURRENT BRANCH NAME:" ${GITHUB_BRANCH_NAME}
+   cd canada-$appname
+   echo ant -f build.xml build.deploy -Dstandalone='true' -Domitlicenses='true' -Dliveconfig='true' -DuseRunAssembler='false' -DNVERSION=${VERSION} -DBRANCH_NAME=${GITHUB_BRANCH_NAME}
+   ant -f build.xml build.deploy -Dstandalone='true' -Domitlicenses='true' -Dliveconfig='true' -DuseRunAssembler='false' -DNVERSION=${VERSION} -DBRANCH_NAME=${GITHUB_BRANCH_NAME}
+  nexusupload:
+  - |
+   #!/bin/bash
+   echo " $appname Build artifacts to be bundled"
+   cd $WORKSPACE/canada-$appname
+   ls -l
+   echo mvn -X -e deploy:deploy-file -q -Durl='http://gec-maven-nexus.walmart.com/nexus/content/repositories/canada_snapshots' -DrepositoryId='canada_snapshots' -DgroupId=com.walmart.canada.atg -DartifactId=canada-${appname} -Dversion=${GITHUB_BRANCH_NAME}-${VERSION}-SNAPSHOT -Dpackaging=tar -Dfile=$WORKSPACE/canada-$appname/canada-${appname}-${GITHUB_BRANCH_NAME}-${VERSION}-SNAPSHOT.tar
+   mvn -X -e deploy:deploy-file -q -Durl='http://gec-maven-nexus.walmart.com/nexus/content/repositories/canada_snapshots' -DrepositoryId='canada_snapshots' -DgroupId=com.walmart.canada.atg -DartifactId=canada-${appname} -Dversion=${GITHUB_BRANCH_NAME}-${VERSION}-SNAPSHOT -Dpackaging=tar -Dfile=$WORKSPACE/canada-$appname/canada-${appname}-${GITHUB_BRANCH_NAME}-${VERSION}-SNAPSHOT.tar
+#Flow for build and delployment
+  appBD(ui Run APP-BD):
+  - call: init
+  - call: appbuild($appname)
+  - call: nexusupload($appname)
+  - savepoint
+  - call: deployApps($appname, ${oneops.assembly}, $platform)
+  #- call: promotebuild($appname)
+#Flow for build and delployment
+  releaseBD(ui Run release-BD):
+  - call: init
+  #- call: appbuild($appname)
+  #- call: nexusupload($appname)
+  #- savepoint
+  #- call: deployApps($appname, ${oneops.assembly}, $platform)
+  - call: promotebuild($appname)
+  deployApps:
+  - oneops.transitionVariableUpdate(organization = 'walmartca', assembly = '${oneops.assembly}', environment = '${environment}', platform = '${platform}', component = artifact-app, variables = { repository = canada_snapshots, appVersion = '${GITHUB_BRANCH_NAME}-${VERSION}-SNAPSHOT' })
+  - oneops.environmentCommitAndDeploy(organization = 'walmartca', assembly = '${oneops.assembly}', environment = '${environment}', platform = '${platform}', deployAllPlatforms = false )
+  promotebuild:
+  - |
+   #!/bin/bash
+   echo " $appname Build artifacts are being promoted to releases repo"
+   cd $WORKSPACE
+   rm -rf *
+   ls -ltr
+   echo "Retriving the latest version in the canada-$appname snapshots"
+   echo http://gec-maven-nexus.walmart.com/nexus/content/repositories/canada_snapshots/com/walmart/canada/atg/canada-${appname}/$GITHUB_BRANCH_NAME-$VERSION-SNAPSHOT/maven-metadata.xml
+   REL_VERSION=`curl -s "http://gec-maven-nexus.walmart.com/nexus/content/repositories/canada_snapshots/com/walmart/canada/atg/canada-${appname}/$GITHUB_BRANCH_NAME-$VERSION-SNAPSHOT/maven-metadata.xml" | grep "<value>.*</value>" | sort | uniq | tail -n1 | sed -e "s#\(.*\)\(<value>\)\(.*\)\(</value>\)\(.*\)#\3#g"`
+   echo "Latest Version"
+   echo ${REL_VERSION}
+
+   echo "Downloading the canada-$appname snapshot "
+   echo wget http://gec-maven-nexus.walmart.com/nexus/content/repositories/canada_snapshots/com/walmart/canada/atg/canada-$appname/$GITHUB_BRANCH_NAME-${VERSION}-SNAPSHOT/canada-$appname-${REL_VERSION}.tar
+   wget http://gec-maven-nexus.walmart.com/nexus/content/repositories/canada_snapshots/com/walmart/canada/atg/canada-$appname/$GITHUB_BRANCH_NAME-$VERSION-SNAPSHOT/canada-$appname-${REL_VERSION}.tar
+   echo "Listing files in the directory"
+   mv canada-$appname-${REL_VERSION}.tar canada-${appname}-${GITHUB_BRANCH_NAME}-${VERSION}.tar
+   ls -l
+   echo mvn -X -e deploy:deploy-file -q -Durl='http://gec-maven-nexus.walmart.com/nexus/content/repositories/canada_releases' -DrepositoryId='canada_releases' -DgroupId=com.walmart.canada.atg -DartifactId=canada-${appname} -Dversion=${GITHUB_BRANCH_NAME}-${VERSION_RELEASE} -Dpackaging=tar -Dfile=$WORKSPACE/canada-${appname}-${GITHUB_BRANCH_NAME}-${VERSION}.tar
+  - mvn -X -e deploy:deploy-file -q -Durl='http://gec-maven-nexus.walmart.com/nexus/content/repositories/canada_releases' -DrepositoryId='canada_releases' -DgroupId=com.walmart.canada.atg -DartifactId=canada-${appname} -Dversion=${GITHUB_BRANCH_NAME}-${VERSION_RELEASE} -Dpackaging=tar -Dfile=$WORKSPACE/canada-${appname}-${GITHUB_BRANCH_NAME}-${VERSION}.tar
